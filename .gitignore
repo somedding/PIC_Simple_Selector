@@ -18,6 +18,9 @@
 *.cr2
 *.nef
 *.arw
+*.orf
+*.rw2
+*.dng
 
 # macOS 시스템 파일
 .DS_Store

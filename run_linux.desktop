@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Photo Selector
+Exec=bash -c 'cd /path/to/project && cargo run'
+Terminal=true
+Icon=/path/to/icon.png 

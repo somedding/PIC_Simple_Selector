@@ -1,0 +1,30 @@
+# Rust 빌드 결과물
+/target/
+
+# IDE 설정 파일들
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust 의존성 락 파일 (선택적)
+# Cargo.lock
+
+# 사진 파일들
+/photos/
+*.jpg
+*.jpeg
+*.raw
+*.cr2
+*.nef
+*.arw
+
+# macOS 시스템 파일
+.DS_Store
+
+# Windows 시스템 파일
+Thumbs.db
+desktop.ini
+
+# 로그 파일
+*.log 

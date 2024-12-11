@@ -7,6 +7,7 @@ use std::{path::PathBuf, collections::HashMap};
 use walkdir::WalkDir;
 use image::open as image_open;
 use rayon::prelude::*;
+use rfd;
 
 struct PhotoSelector {
     photo_paths: Vec<PathBuf>,
@@ -50,6 +51,8 @@ enum Message {
     DeletePhoto(usize),
     KeyPressed(keyboard::Event),
     LoadingStatus(String),
+    OpenFolderDialog,
+    FolderSelected(PathBuf),
 }
 
 impl Application for PhotoSelector {
@@ -68,7 +71,19 @@ impl Application for PhotoSelector {
                 current_photo_index: 0,
                 loading_file: None,
             },
-            Command::perform(load_photo_paths(), Message::LoadPhotoPaths),
+            Command::perform(
+                async {
+                    if let Some(folder) = rfd::AsyncFileDialog::new()
+                        .set_title("Select Photos Directory")
+                        .pick_folder()
+                        .await {
+                        Some(folder.path().to_path_buf())
+                    } else {
+                        None
+                    }
+                },
+                |path| path.map_or(Message::LoadPhotoPaths(Vec::new()), Message::FolderSelected)
+            ),
         )
     }
 
@@ -314,6 +329,27 @@ impl Application for PhotoSelector {
                 self.loading_file = Some(filename);
                 Command::none()
             }
+            Message::OpenFolderDialog => {
+                Command::perform(
+                    async {
+                        if let Some(folder) = rfd::AsyncFileDialog::new()
+                            .set_title("Select Photos Directory")
+                            .pick_folder()
+                            .await {
+                            Some(folder.path().to_path_buf())
+                        } else {
+                            None
+                        }
+                    },
+                    |path| path.map_or(Message::LoadPhotoPaths(Vec::new()), Message::FolderSelected)
+                )
+            }
+            Message::FolderSelected(folder_path) => {
+                Command::perform(
+                    load_photo_paths_from(folder_path),
+                    Message::LoadPhotoPaths
+                )
+            }
         }
     }
 
@@ -321,7 +357,9 @@ impl Application for PhotoSelector {
         if self.photo_paths.is_empty() {
             return column![
                 text("No photos available").size(30),
+                button("Select Folder").on_press(Message::OpenFolderDialog),
             ]
+            .spacing(20)
             .into();
         }
 
@@ -375,30 +413,16 @@ impl Application for PhotoSelector {
 }
 
 async fn load_photo_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
     let photos_dir = std::path::Path::new("photos");
     
     if !photos_dir.exists() {
         if let Err(e) = std::fs::create_dir(photos_dir) {
             eprintln!("Failed to create photos directory: {}", e);
-            return paths;
+            return Vec::new();
         }
     }
 
-    for entry in WalkDir::new(photos_dir).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if let Some(extension) = path.extension() {
-            match extension.to_str().unwrap().to_lowercase().as_str() {
-                "jpg" | "jpeg" | "JPG" | "JPEG" => {
-                    paths.push(path.to_path_buf());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    paths.par_sort();
-    paths
+    load_photo_paths_from(photos_dir.to_path_buf()).await
 }
 
 async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
@@ -527,6 +551,25 @@ fn check_raw_exists(jpg_path: &std::path::Path) -> bool {
         raw_path.set_extension(ext);
         raw_path.exists()
     })
+}
+
+async fn load_photo_paths_from(folder_path: PathBuf) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    
+    for entry in WalkDir::new(folder_path).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if let Some(extension) = path.extension() {
+            match extension.to_str().unwrap().to_lowercase().as_str() {
+                "jpg" | "jpeg" | "JPG" | "JPEG" => {
+                    paths.push(path.to_path_buf());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    paths.par_sort();
+    paths
 }
 
 fn main() -> iced::Result {

@@ -6,6 +6,7 @@ use iced::{
 use std::{path::PathBuf, collections::HashMap};
 use walkdir::WalkDir;
 use image::open as image_open;
+use rayon::prelude::*;
 
 struct PhotoSelector {
     photo_paths: Vec<PathBuf>,
@@ -13,11 +14,13 @@ struct PhotoSelector {
     link_raw_jpg: bool,
     selected_photos: HashMap<PathBuf, bool>,
     current_photo_index: usize,
+    loading_file: Option<String>,
 }
 
 impl PhotoSelector {
     fn cleanup_cache(&mut self) {
         let keep_indices: Vec<usize> = vec![
+            self.current_photo_index.saturating_sub(1),
             self.current_photo_index,
             self.current_photo_index.saturating_add(1)
         ];
@@ -46,6 +49,7 @@ enum Message {
     SelectPhoto,
     DeletePhoto(usize),
     KeyPressed(keyboard::Event),
+    LoadingStatus(String),
 }
 
 impl Application for PhotoSelector {
@@ -62,6 +66,7 @@ impl Application for PhotoSelector {
                 link_raw_jpg: true,
                 selected_photos: HashMap::new(),
                 current_photo_index: 0,
+                loading_file: None,
             },
             Command::perform(load_photo_paths(), Message::LoadPhotoPaths),
         )
@@ -86,31 +91,34 @@ impl Application for PhotoSelector {
             Message::LoadPhotoPaths(paths) => {
                 self.photo_paths = paths;
                 if !self.photo_paths.is_empty() {
-                    let load_commands: Vec<Command<Message>> = self.photo_paths.iter()
-                        .take(2)
-                        .enumerate()
-                        .map(|(i, path)| {
-                            Command::perform(
-                                load_single_photo(path.clone(), i),
-                                Message::PhotoLoaded
-                            )
-                        })
-                        .collect();
-                    Command::batch(load_commands)
+                    Command::batch(
+                        self.photo_paths.iter()
+                            .take(10)
+                            .enumerate()
+                            .map(|(i, path)| {
+                                let filename = path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                Command::batch(vec![
+                                    Command::perform(
+                                        async move { filename.clone() },
+                                        Message::LoadingStatus
+                                    ),
+                                    Command::perform(
+                                        load_single_photo(path.clone(), i),
+                                        Message::PhotoLoaded
+                                    )
+                                ])
+                            })
+                            .collect::<Vec<_>>()
+                    )
                 } else {
                     Command::none()
                 }
             }
             Message::PhotoLoaded((index, photo)) => {
                 self.cached_photos.insert(index, photo);
-                while self.cached_photos.len() > 2 {
-                    let oldest = self.cached_photos
-                        .keys()
-                        .min()
-                        .copied()
-                        .unwrap_or(0);
-                    self.cached_photos.remove(&oldest);
-                }
                 Command::none()
             }
             Message::ToggleLinkRawJpg(value) => {
@@ -150,20 +158,43 @@ impl Application for PhotoSelector {
                 if self.current_photo_index < self.photo_paths.len() - 1 {
                     self.current_photo_index += 1;
                     self.cleanup_cache();
-                    if self.current_photo_index + 1 < self.photo_paths.len() {
-                        Command::perform(
-                            load_single_photo(
-                                self.photo_paths[self.current_photo_index + 1].clone(),
-                                self.current_photo_index + 1
-                            ),
-                            Message::PhotoLoaded
-                        )
-                    } else {
-                        Command::none()
+
+                    let current_batch = self.current_photo_index / 10;
+                    let position_in_batch = self.current_photo_index % 10;
+                    
+                    if position_in_batch >= 5 {
+                        let next_batch_start = (current_batch + 1) * 10;
+                        
+                        if next_batch_start < self.photo_paths.len() && 
+                           !self.cached_photos.contains_key(&next_batch_start) {
+                            return Command::batch(
+                                self.photo_paths.iter()
+                                    .skip(next_batch_start)
+                                    .take(10)
+                                    .enumerate()
+                                    .map(|(i, path)| {
+                                        let actual_index = next_batch_start + i;
+                                        let filename = path.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+                                        Command::batch(vec![
+                                            Command::perform(
+                                                async move { filename.clone() },
+                                                Message::LoadingStatus
+                                            ),
+                                            Command::perform(
+                                                load_single_photo(path.clone(), actual_index),
+                                                Message::PhotoLoaded
+                                            )
+                                        ])
+                                    })
+                                    .collect::<Vec<_>>()
+                            );
+                        }
                     }
-                } else {
-                    Command::none()
                 }
+                Command::none()
             }
             Message::PreviousPhoto => {
                 if self.current_photo_index > 0 {
@@ -279,6 +310,10 @@ impl Application for PhotoSelector {
                 }
                 Command::none()
             }
+            Message::LoadingStatus(filename) => {
+                self.loading_file = Some(filename);
+                Command::none()
+            }
         }
     }
 
@@ -291,6 +326,9 @@ impl Application for PhotoSelector {
         }
 
         if let Some(photo) = self.cached_photos.get(&self.current_photo_index) {
+            let total_photos = self.photo_paths.len();
+            let current_index = self.current_photo_index + 1;
+
             let photo_element = container(
                 column![
                     iced_image(photo.handle.clone())
@@ -300,7 +338,8 @@ impl Application for PhotoSelector {
                     row![
                         button("S - Select").on_press(Message::SelectPhoto),
                         button("D - Delete").on_press(Message::DeletePhoto(self.current_photo_index)),
-                    ]
+                    ],
+                    text(format!("{}/{}", current_index, total_photos)).size(20),
                 ]
                 .spacing(10)
             )
@@ -316,8 +355,19 @@ impl Application for PhotoSelector {
             .spacing(20)
             .into()
         } else {
+            let loading_text = if let Some(filename) = &self.loading_file {
+                format!("Loading: {}\n({} photos loaded)", 
+                    filename, 
+                    self.cached_photos.len()
+                )
+            } else {
+                format!("Loading...\n({} photos loaded)",
+                    self.cached_photos.len()
+                )
+            };
+
             column![
-                text("Loading...").size(30),
+                text(loading_text).size(30),
             ]
             .into()
         }
@@ -346,10 +396,17 @@ async fn load_photo_paths() -> Vec<PathBuf> {
             }
         }
     }
+
+    paths.par_sort();
     paths
 }
 
 async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
+    let filename = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     let exif_data = if let Ok(file) = std::fs::File::open(&path) {
         if let Ok(exif_reader) = exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file)) {
             format_exif_data(&exif_reader)
@@ -362,11 +419,38 @@ async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
 
     let has_raw = check_raw_exists(&path);
     let handle = if let Ok(img) = image_open(&path) {
-        iced::widget::image::Handle::from_pixels(
-            img.width(),
-            img.height(),
-            img.to_rgba8().into_raw(),
-        )
+        let (width, height) = (img.width(), img.height());
+        let handle = if width > 1600 || height > 900 {
+            let aspect_ratio = width as f32 / height as f32;
+            
+            let (new_width, new_height) = if aspect_ratio < 1.0 {
+                let new_height = 900;
+                let new_width = (new_height as f32 * aspect_ratio) as u32;
+                (new_width, new_height)
+            } else {
+                let new_width = 1600;
+                let new_height = (new_width as f32 / aspect_ratio) as u32;
+                (new_width, new_height)
+            };
+
+            let resized = img.resize_exact(
+                new_width,
+                new_height,
+                image::imageops::FilterType::Triangle
+            );
+            iced::widget::image::Handle::from_pixels(
+                resized.width(),
+                resized.height(),
+                resized.to_rgba8().into_raw(),
+            )
+        } else {
+            iced::widget::image::Handle::from_pixels(
+                width,
+                height,
+                img.to_rgba8().into_raw(),
+            )
+        };
+        handle
     } else {
         iced::widget::image::Handle::from_pixels(1, 1, vec![0, 0, 0, 255])
     };
@@ -409,15 +493,40 @@ fn format_exif_data(exif: &exif::Exif) -> String {
     result
 }
 
-fn check_raw_exists(jpg_path: &std::path::Path) -> bool {
-    let raw_path = get_raw_path(jpg_path);
-    raw_path.exists()
+fn get_raw_path(jpg_path: &std::path::Path) -> PathBuf {
+    let raw_extensions = ["DNG", "dng", "RAW", "raw", "CR2", "cr2", "NEF", "nef", "ARW", "arw"];
+    let stem = jpg_path.file_stem().unwrap_or_default();
+    let parent = jpg_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+
+    // 모든 가능한 RAW 확장자에 대해 검사
+    for ext in raw_extensions.iter() {
+        let mut raw_path = parent.to_path_buf();
+        raw_path.push(stem);
+        raw_path.set_extension(ext);
+        if raw_path.exists() {
+            return raw_path;
+        }
+    }
+
+    // 기본값으로 DNG 반환
+    let mut default_path = parent.to_path_buf();
+    default_path.push(stem);
+    default_path.set_extension("DNG");
+    default_path
 }
 
-fn get_raw_path(jpg_path: &std::path::Path) -> PathBuf {
-    let mut raw_path = jpg_path.to_path_buf();
-    raw_path.set_extension("raw");
-    raw_path
+fn check_raw_exists(jpg_path: &std::path::Path) -> bool {
+    let raw_extensions = ["DNG", "dng", "RAW", "raw", "CR2", "cr2", "NEF", "nef", "ARW", "arw"];
+    let stem = jpg_path.file_stem().unwrap_or_default();
+    let parent = jpg_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+
+    // 모든 가능한 RAW 확장자에 대해 검사
+    raw_extensions.iter().any(|ext| {
+        let mut raw_path = parent.to_path_buf();
+        raw_path.push(stem);
+        raw_path.set_extension(ext);
+        raw_path.exists()
+    })
 }
 
 fn main() -> iced::Result {

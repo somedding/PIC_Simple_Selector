@@ -5,9 +5,7 @@ edition = "2021"
 
 [dependencies]
 iced = { version = "0.10", features = ["image"] }
-iced_native = "0.10"
-kamadak-exif = "0.5"
 image = "0.24"
 walkdir = "2.4"
-tokio = { version = "1.32", features = ["full"] }
-anyhow = "1.0" 
+kamadak-exif = "0.5"
+rayon = "1.8" 

@@ -12,7 +12,6 @@ use rfd;
 struct PhotoSelector {
     photo_paths: Vec<PathBuf>,
     cached_photos: HashMap<usize, Photo>,
-    link_raw_jpg: bool,
     selected_photos: HashMap<PathBuf, bool>,
     current_photo_index: usize,
     loading_file: Option<String>,
@@ -34,7 +33,6 @@ impl PhotoSelector {
 struct Photo {
     path: PathBuf,
     exif_data: String,
-    has_raw: bool,
     handle: iced::widget::image::Handle,
 }
 
@@ -42,9 +40,6 @@ struct Photo {
 enum Message {
     LoadPhotoPaths(Vec<PathBuf>),
     PhotoLoaded((usize, Photo)),
-    ToggleLinkRawJpg(bool),
-    ToggleSelect(PathBuf),
-    DeleteSelected,
     NextPhoto,
     PreviousPhoto,
     SelectPhoto,
@@ -66,7 +61,6 @@ impl Application for PhotoSelector {
             PhotoSelector {
                 photo_paths: Vec::new(),
                 cached_photos: HashMap::new(),
-                link_raw_jpg: true,
                 selected_photos: HashMap::new(),
                 current_photo_index: 0,
                 loading_file: None,
@@ -134,39 +128,6 @@ impl Application for PhotoSelector {
             }
             Message::PhotoLoaded((index, photo)) => {
                 self.cached_photos.insert(index, photo);
-                Command::none()
-            }
-            Message::ToggleLinkRawJpg(value) => {
-                self.link_raw_jpg = value;
-                Command::none()
-            }
-            Message::ToggleSelect(path) => {
-                let selected = self.selected_photos.entry(path).or_insert(false);
-                *selected = !*selected;
-                Command::none()
-            }
-            Message::DeleteSelected => {
-                let paths_to_remove: Vec<PathBuf> = self.photo_paths.iter()
-                    .filter(|path| *self.selected_photos.get(*path).unwrap_or(&false))
-                    .cloned()
-                    .collect();
-
-                for path in paths_to_remove {
-                    if self.link_raw_jpg && check_raw_exists(&path) {
-                        let raw_path = get_raw_path(&path);
-                        if let Err(e) = std::fs::remove_file(&raw_path) {
-                            eprintln!("Failed to delete RAW file: {}", e);
-                        }
-                    }
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        eprintln!("Failed to delete JPG file: {}", e);
-                    }
-                    if let Some(index) = self.photo_paths.iter().position(|p| p == &path) {
-                        self.photo_paths.remove(index);
-                        self.cached_photos.remove(&index);
-                    }
-                }
-                self.selected_photos.clear();
                 Command::none()
             }
             Message::NextPhoto => {
@@ -246,12 +207,6 @@ impl Application for PhotoSelector {
             Message::DeletePhoto(index) => {
                 if index < self.photo_paths.len() {
                     let path_to_delete = self.photo_paths[index].clone();
-                    if self.link_raw_jpg && check_raw_exists(&path_to_delete) {
-                        let raw_path = get_raw_path(&path_to_delete);
-                        if let Err(e) = std::fs::remove_file(&raw_path) {
-                            eprintln!("Failed to delete RAW file: {}", e);
-                        }
-                    }
                     if let Err(e) = std::fs::remove_file(&path_to_delete) {
                         eprintln!("Failed to delete JPG file: {}", e);
                     }
@@ -412,21 +367,8 @@ impl Application for PhotoSelector {
     }
 }
 
-async fn load_photo_paths() -> Vec<PathBuf> {
-    let photos_dir = std::path::Path::new("photos");
-    
-    if !photos_dir.exists() {
-        if let Err(e) = std::fs::create_dir(photos_dir) {
-            eprintln!("Failed to create photos directory: {}", e);
-            return Vec::new();
-        }
-    }
-
-    load_photo_paths_from(photos_dir.to_path_buf()).await
-}
-
 async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
-    let filename = path.file_name()
+    let _filename = path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
@@ -441,7 +383,6 @@ async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
         String::new()
     };
 
-    let has_raw = check_raw_exists(&path);
     let handle = if let Ok(img) = image_open(&path) {
         let (width, height) = (img.width(), img.height());
         let handle = if width > 1600 || height > 900 {
@@ -482,7 +423,6 @@ async fn load_single_photo(path: PathBuf, index: usize) -> (usize, Photo) {
     (index, Photo {
         path,
         exif_data,
-        has_raw,
         handle,
     })
 }
@@ -515,42 +455,6 @@ fn format_exif_data(exif: &exif::Exif) -> String {
     }
     
     result
-}
-
-fn get_raw_path(jpg_path: &std::path::Path) -> PathBuf {
-    let raw_extensions = ["DNG", "dng", "RAW", "raw", "CR2", "cr2", "NEF", "nef", "ARW", "arw"];
-    let stem = jpg_path.file_stem().unwrap_or_default();
-    let parent = jpg_path.parent().unwrap_or_else(|| std::path::Path::new(""));
-
-    // 모든 가능한 RAW 확장자에 대해 검사
-    for ext in raw_extensions.iter() {
-        let mut raw_path = parent.to_path_buf();
-        raw_path.push(stem);
-        raw_path.set_extension(ext);
-        if raw_path.exists() {
-            return raw_path;
-        }
-    }
-
-    // 기본값으로 DNG 반환
-    let mut default_path = parent.to_path_buf();
-    default_path.push(stem);
-    default_path.set_extension("DNG");
-    default_path
-}
-
-fn check_raw_exists(jpg_path: &std::path::Path) -> bool {
-    let raw_extensions = ["DNG", "dng", "RAW", "raw", "CR2", "cr2", "NEF", "nef", "ARW", "arw"];
-    let stem = jpg_path.file_stem().unwrap_or_default();
-    let parent = jpg_path.parent().unwrap_or_else(|| std::path::Path::new(""));
-
-    // 모든 가능한 RAW 확장자에 대해 검사
-    raw_extensions.iter().any(|ext| {
-        let mut raw_path = parent.to_path_buf();
-        raw_path.push(stem);
-        raw_path.set_extension(ext);
-        raw_path.exists()
-    })
 }
 
 async fn load_photo_paths_from(folder_path: PathBuf) -> Vec<PathBuf> {
